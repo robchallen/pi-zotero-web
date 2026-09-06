@@ -1,18 +1,21 @@
 # pi-zotero-web
 
-Zotero integration for [pi](https://pi.dev) via the Zotero Web API.
+Zotero integration for [pi](https://pi.dev) supporting both the **Zotero Local API** (desktop app) and the **Zotero Web API**.
 
-- **CRUD on paper metadata + PDFs** — create, read, update, delete items and attachments; upload/download PDF files (full 4-step Zotero file upload flow).
+- **Dual-mode support** — automatically defaults to the high-performance offline **Local API** (`http://localhost:23119/api/`) when Zotero desktop is running, falling back to the remote **Web API** (`https://api.zotero.org`).
+- **Interactive local write authorization** — write operations on the Local API interactively trigger Zotero's desktop approval modal ("Allow" / "Always Allow" / "Deny") with automatic key persistence. Reads need no credentials.
+- **CRUD on paper metadata + PDFs** — create, read, update, delete items and attachments; upload/download PDF files.
 - **Library search** — keyword, title/author/year, and full-text (`qmode=everything`) search.
 - **Tags & collections** — manage tags, list/create/rename/delete collections, and move items in/out of collections.
 - **Citation export** — export items as BibTeX, BibLaTeX, CSL JSON, RIS, CSV, MODS, COinS, bookmarks, or a formatted bibliography.
-- **Schema & full-text** — read the item-type/field/creator schema, and get/set extracted full-text content for attachments (enables headless full-text search).
-- **API key management via `/login zotero`** — the key (and resolved user id) are stored in `~/.pi/agent/auth.json`; the login re-prompts up to 3 times on a rejected key; `/logout zotero` removes it.
+- **Schema & full-text** — read the item-type/field/creator schema, and get/set extracted full-text content for attachments.
+- **Credential management via `/login zotero`** — autodetects desktop Zotero, allows picking Local vs Web mode, and persists credentials in `~/.pi/agent/auth.json`.
 
 ## Requirements
 
-- A Zotero account with a **personal library**.
-- A Zotero API key created at <https://www.zotero.org/settings/keys> with **Allow library access** and **Allow file access** (write access is needed for create/update/delete/upload).
+Either:
+- **Local Mode (Recommended):** Zotero desktop (v7/8/10+) running locally with **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** enabled. No web API key needed.
+- **Web API Mode:** A Zotero account with an API key created at <https://www.zotero.org/settings/keys> with **Allow library access** and **Allow file access** (plus write permissions if modifying items).
 
 ## Install
 
@@ -34,21 +37,39 @@ pi -e ./index.ts
 
 ## Configure
 
-Run `/login zotero` and paste your Zotero API key. It is verified against `/keys/current` and stored (with your user id) in `~/.pi/agent/auth.json`:
+Run `/login zotero`. If Zotero desktop is running, it prompts you to select between:
+1. **Local Zotero Desktop (Automatic / no web API key needed)**
+2. **Zotero Web API Key**
+
+### 1. Local Mode
+When Local Mode is active:
+- Read operations require **no configuration or API key**.
+- Write operations (create, update, delete, upload) trigger a native Zotero confirmation prompt on your desktop.
+- Selecting **"Always Allow"** saves the granted key in `~/.pi/agent/auth.json` keyed by the local database's `Zotero-Server-ID`, avoiding prompts on future operations.
+- Selecting **"Allow"** grants a single-use key consumed on that write.
+
+### 2. Web API Mode
+If choosing Web API Mode, paste your Zotero Web API key. It is verified against `/keys/current` and stored with your numeric user id in `~/.pi/agent/auth.json`:
 
 ```jsonc
 {
   "zotero": {
     "type": "api_key",
     "key": "<your-key>",
-    "env": { "ZOTERO_USER_ID": "12345" }
+    "env": {
+      "ZOTERO_MODE": "web",
+      "ZOTERO_USER_ID": "12345"
+    }
   }
 }
 ```
 
-To use a **group library** instead of your personal library, add `"ZOTERO_GROUP_ID": "<group-id>"` under `env`.
+To force a specific mode or group library via environment configuration in `auth.json`:
+- `"ZOTERO_MODE": "local"` or `"web"`
+- `"ZOTERO_GROUP_ID": "<group-id>"`
+- `"ZOTERO_BASE_URL": "http://localhost:23119/api"`
 
-Remove the stored key with `/logout zotero`.
+Remove stored credentials anytime with `/logout zotero`.
 
 ## Tools
 
@@ -105,9 +126,12 @@ The pi host packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`
 
 ## How it works
 
-- `provider.ts` registers a native pi-ai `Provider` named `zotero` that declares **no LLM models** (so it never appears in `/model`). Its only purpose is authentication: `/login zotero` runs the provider's `apiKey.login` flow, which verifies the key and stores it.
-- Tools read the stored credential via `ctx.modelRegistry.getProviderAuth("zotero")` and call the Zotero Web API (`https://api.zotero.org`) with the `Zotero-API-Key` header.
-- File upload implements Zotero's full 4-step flow (create attachment item → upload authorization → S3 `prefix+file+suffix` POST → register upload).
+- `provider.ts` registers a native pi-ai `Provider` named `zotero` declaring **no LLM models**. `/login zotero` runs provider authentication, detecting local vs web environments.
+- Tools read configuration via `resolveConfig(ctx)`:
+  - If local Zotero is responding on `localhost:23119`, it defaults to the **Local API** (`http://localhost:23119/api/`). Reads are sent without credentials.
+  - On write operations, `client.ts` automatically requests authorization via `POST /api/local/authorize` with `Zotero-Server-ID`. If the user selects "Always Allow", the key is remembered; if "Allow" was chosen, the key is single-use.
+  - If local Zotero is not running or if `ZOTERO_MODE="web"`, it calls the Zotero Web API (`https://api.zotero.org`) authenticated by `Zotero-API-Key`.
+- File upload implements Zotero's full 4-step flow (create attachment item → upload authorization → upload bytes → register upload), targeting local upload endpoints in Local Mode or S3 in Web API Mode.
 
 ## License
 
