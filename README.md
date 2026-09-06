@@ -14,7 +14,7 @@ Zotero integration for [pi](https://pi.dev) supporting both the **Zotero Local A
 ## Requirements
 
 Either:
-- **Local Mode (Recommended):** Zotero desktop (v7/8/10+) running locally with **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** enabled. No web API key needed.
+- **Local Mode (Recommended):** Zotero desktop 10+ running locally with **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** enabled. (Local write API and interactive authorization require Zotero 10+). No web API key needed.
 - **Web API Mode:** A Zotero account with an API key created at <https://www.zotero.org/settings/keys> with **Allow library access** and **Allow file access** (plus write permissions if modifying items).
 
 ## Install

@@ -593,4 +593,24 @@ describe("client local mode write auth", () => {
 
 		handle.restore();
 	});
+
+	it("rejects local write if Zotero desktop version is less than 10", async () => {
+		const handle = mockFetch((c) => {
+			if (c.method === "GET" && c.url === "http://localhost:23119/api-v8/") {
+				return {
+					status: 200,
+					body: "",
+					headers: { "x-zotero-version": "8.0.4", "zotero-server-id": "SRV8" },
+				};
+			}
+			return undefined;
+		});
+
+		await assert.rejects(
+			() => createItems({ ...LOCAL_CFG, baseUrl: "http://localhost:23119/api-v8" }, [{ itemType: "book" }]),
+			/requires Zotero 10\+/,
+		);
+
+		handle.restore();
+	});
 });

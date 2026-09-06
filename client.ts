@@ -69,6 +69,15 @@ const localSessions = new Map<string, LocalAuthSession>();
 
 export async function fetchServerId(baseUrl: string, signal?: AbortSignal): Promise<string> {
 	const res = await fetch(`${baseUrl}/`, { method: "GET", signal });
+	const zoteroVersion = res.headers.get("x-zotero-version") || "";
+	const majorVersion = parseInt(zoteroVersion.split(".")[0] || "0", 10);
+	if (majorVersion && majorVersion < 10) {
+		throw new ZoteroError(
+			`Local Zotero write API requires Zotero 10+ (detected ${zoteroVersion || "pre-10"}). Please update Zotero or use Web API mode.`,
+			400,
+			"",
+		);
+	}
 	const serverId = res.headers.get("zotero-server-id");
 	if (!serverId) {
 		throw new ZoteroError("Local Zotero response did not include Zotero-Server-ID header", res.status, "");
