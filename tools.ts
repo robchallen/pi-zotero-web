@@ -2,7 +2,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-import { ZOTERO_PROVIDER_ID } from "./provider.ts";
+import {
+	DEFAULT_LOCAL_API_BASE,
+	DEFAULT_WEB_API_BASE,
+	ZOTERO_PROVIDER_ID,
+	isLocalApiReachable,
+} from "./provider.ts";
 import {
 	type ZoteroConfig,
 	type ZoteroItem,
@@ -38,10 +43,65 @@ import {
 /** Resolve the stored Zotero credential into a config, or throw a helpful error. */
 async function resolveConfig(ctx: ExtensionContext): Promise<ZoteroConfig> {
 	const auth = await ctx.modelRegistry.getProviderAuth(ZOTERO_PROVIDER_ID);
+	const mode = auth?.env?.ZOTERO_MODE as "local" | "web" | undefined;
+
+	// 1. If explicit web mode requested, force web
+	if (mode === "web") {
+		const apiKey = auth?.auth.apiKey;
+		const userId = auth?.env?.ZOTERO_USER_ID;
+		if (!apiKey || !userId) {
+			throw new Error("Web mode configured but missing Zotero API key or user id. Run `/login zotero`.");
+		}
+		const cfg: ZoteroConfig = {
+			mode: "web",
+			baseUrl: auth?.env?.ZOTERO_BASE_URL || DEFAULT_WEB_API_BASE,
+			apiKey,
+			userId,
+		};
+		const groupId = auth?.env?.ZOTERO_GROUP_ID;
+		if (typeof groupId === "string" && groupId) cfg.groupId = groupId;
+		return cfg;
+	}
+
+	// 2. Check if local API is reachable: default to local when available!
+	const localAvailable = await isLocalApiReachable();
+
+	if (localAvailable || mode === "local" || auth?.auth?.apiKey === "local") {
+		// Local mode
+		const cfg: ZoteroConfig = {
+			mode: "local",
+			baseUrl: auth?.env?.ZOTERO_BASE_URL || DEFAULT_LOCAL_API_BASE,
+			apiKey: auth?.env?.ZOTERO_LOCAL_KEY,
+			userId: auth?.env?.ZOTERO_USER_ID || "0",
+			serverId: auth?.env?.ZOTERO_SERVER_ID,
+			notify: (msg: string) => {
+				ctx.ui.notify(msg, "info");
+			},
+			saveAuth: async ({ serverId, localKey }) => {
+				try {
+					const current = await ctx.modelRegistry.getProviderAuth(ZOTERO_PROVIDER_ID);
+					if (current) {
+						current.env = {
+							...(current.env ?? {}),
+							ZOTERO_SERVER_ID: serverId,
+							...(localKey ? { ZOTERO_LOCAL_KEY: localKey } : {}),
+						};
+					}
+				} catch {
+					// Ignore
+				}
+			},
+		};
+		const groupId = auth?.env?.ZOTERO_GROUP_ID;
+		if (typeof groupId === "string" && groupId) cfg.groupId = groupId;
+		return cfg;
+	}
+
+	// 3. Fallback to Web API if local is not reachable
 	const apiKey = auth?.auth.apiKey;
 	if (!apiKey) {
 		throw new Error(
-			"No Zotero API key configured. Run `/login zotero` to set one (it is stored in ~/.pi/agent/auth.json).",
+			"No Zotero API key configured and local Zotero is not reachable. Run `/login zotero` to set one.",
 		);
 	}
 	const userId = auth?.env?.ZOTERO_USER_ID;
@@ -50,9 +110,13 @@ async function resolveConfig(ctx: ExtensionContext): Promise<ZoteroConfig> {
 			"Zotero API key is stored but no user id was found. Re-run `/login zotero` to refresh it.",
 		);
 	}
-	const cfg: ZoteroConfig = { apiKey, userId };
-	// Group library override via provider-scoped env (set manually in auth.json if needed).
-	const groupId = auth.env?.ZOTERO_GROUP_ID;
+	const cfg: ZoteroConfig = {
+		mode: "web",
+		baseUrl: auth?.env?.ZOTERO_BASE_URL || DEFAULT_WEB_API_BASE,
+		apiKey,
+		userId,
+	};
+	const groupId = auth?.env?.ZOTERO_GROUP_ID;
 	if (typeof groupId === "string" && groupId) cfg.groupId = groupId;
 	return cfg;
 }

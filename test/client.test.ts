@@ -529,3 +529,68 @@ describe("client full text", () => {
 		handle.restore();
 	});
 });
+
+describe("client local mode write auth", () => {
+	const LOCAL_CFG: ZoteroConfig = {
+		mode: "local",
+		baseUrl: "http://localhost:23119/api",
+		userId: "0",
+	};
+
+	it("retrieves serverId, authorizes write, and sends key + serverId headers", async () => {
+		const calls: FetchCall[] = [];
+		const handle = mockFetch((c) => {
+			calls.push(c);
+			if (c.method === "GET" && c.url === "http://localhost:23119/api/") {
+				return { status: 200, body: "Nothing to see here.", headers: { "zotero-server-id": "SRV123" } };
+			}
+			if (c.method === "POST" && c.url === "http://localhost:23119/api/local/authorize") {
+				return json(200, { key: "WRITEKEY32", remember: true });
+			}
+			if (c.method === "POST" && c.url.endsWith("/users/0/items")) {
+				return json(200, { successful: { "0": { key: "LOC1", version: 1, data: {} } }, success: { "0": "LOC1" }, unchanged: {}, failed: {} });
+			}
+			return undefined;
+		});
+
+		let savedAuthData: any;
+		const cfgWithSave: ZoteroConfig = {
+			...LOCAL_CFG,
+			saveAuth: (data) => {
+				savedAuthData = data;
+			},
+		};
+
+		const created = await createItems(cfgWithSave, [{ itemType: "book", title: "Local Book" }]);
+		assert.equal(created.length, 1);
+		assert.equal(savedAuthData?.serverId, "SRV123");
+		assert.equal(savedAuthData?.localKey, "WRITEKEY32");
+
+		// Check the write request carried Zotero-Server-ID and Zotero-API-Key
+		const writeCall = calls.find((c) => c.method === "POST" && c.url.endsWith("/users/0/items"));
+		assert.ok(writeCall, "missing write call");
+		assert.equal(writeCall.headers["zotero-server-id"], "SRV123");
+		assert.equal(writeCall.headers["zotero-api-key"], "WRITEKEY32");
+
+		handle.restore();
+	});
+
+	it("throws helpful error when user denies authorization", async () => {
+		const handle = mockFetch((c) => {
+			if (c.method === "GET" && c.url === "http://localhost:23119/api2/") {
+				return { status: 200, body: "", headers: { "zotero-server-id": "SRV123" } };
+			}
+			if (c.method === "POST" && c.url === "http://localhost:23119/api2/local/authorize") {
+				return { status: 403, body: JSON.stringify({ denied: true }) };
+			}
+			return undefined;
+		});
+
+		await assert.rejects(
+			() => createItems({ ...LOCAL_CFG, baseUrl: "http://localhost:23119/api2" }, [{ itemType: "book" }]),
+			/denied by user/,
+		);
+
+		handle.restore();
+	});
+});

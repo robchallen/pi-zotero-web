@@ -97,11 +97,14 @@ describe("provider.login flow", () => {
 			},
 			notify() {},
 		};
-		const handle = mockFetch(() => {
-			authCalls++;
-			return authCalls === 1
-				? { status: 403, body: "Invalid key" }
-				: { status: 200, body: { userID: 42, username: "me", access: { user: { library: true } } } };
+		const handle = mockFetch((c) => {
+			if (c.url.endsWith("/keys/current")) {
+				authCalls++;
+				return authCalls === 1
+					? { status: 403, body: "Invalid key" }
+					: { status: 200, body: { userID: 42, username: "me", access: { user: { library: true } } } };
+			}
+			return undefined;
 		});
 		const provider = createZoteroProvider();
 		const cred = await provider.auth.apiKey!.login!(interaction);

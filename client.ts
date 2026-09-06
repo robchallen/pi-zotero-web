@@ -3,13 +3,21 @@ import { basename } from "node:path";
 import { readFile } from "node:fs/promises";
 import { ZOTERO_API_BASE } from "./provider.ts";
 
-/** Resolved Zotero credentials used to authenticate Web API requests. */
+/** Resolved Zotero credentials used to authenticate requests. */
 export interface ZoteroConfig {
-	apiKey: string;
-	/** Numeric user id for the personal library, resolved from /keys/current during login. */
-	userId: string;
+	mode?: "local" | "web";
+	baseUrl?: string;
+	apiKey?: string;
+	/** Numeric user id for the personal library. For local API, defaults to "0". */
+	userId?: string;
 	/** Optional group library id. When set, group libraries are used instead of the personal library. */
 	groupId?: string;
+	/** Cached/configured Zotero Server ID for local mode. */
+	serverId?: string;
+	/** Callback invoked to notify user during interactive auth. */
+	notify?: (message: string) => void;
+	/** Callback to persist remembered credentials (e.g. Always Allow keys). */
+	saveAuth?: (data: { serverId: string; localKey?: string; remember?: boolean }) => Promise<void> | void;
 }
 
 export interface ZoteroItem {
@@ -31,14 +39,115 @@ export class ZoteroError extends Error {
 }
 
 function prefix(cfg: ZoteroConfig): string {
-	return cfg.groupId ? `/groups/${cfg.groupId}` : `/users/${cfg.userId}`;
+	if (cfg.groupId) return `/groups/${cfg.groupId}`;
+	const uid = cfg.userId ?? (isLocal(cfg) ? "0" : "");
+	return uid ? `/users/${uid}` : "";
 }
 
-function baseHeaders(cfg: ZoteroConfig): Record<string, string> {
-	return {
-		"Zotero-API-Key": cfg.apiKey,
-		"Zotero-API-Version": "3",
-	};
+export function isLocal(cfg: ZoteroConfig): boolean {
+	if (cfg.mode === "local") return true;
+	if (cfg.mode === "web") return false;
+	if (cfg.baseUrl) {
+		return cfg.baseUrl.includes("localhost") || cfg.baseUrl.includes("127.0.0.1");
+	}
+	return false;
+}
+
+export function getBaseUrl(cfg?: ZoteroConfig): string {
+	const raw = cfg?.baseUrl ?? ZOTERO_API_BASE;
+	return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+}
+
+/** In-memory state for local API write authorizations */
+interface LocalAuthSession {
+	serverId?: string;
+	writeKey?: string;
+	remember?: boolean;
+}
+
+const localSessions = new Map<string, LocalAuthSession>();
+
+export async function fetchServerId(baseUrl: string, signal?: AbortSignal): Promise<string> {
+	const res = await fetch(`${baseUrl}/`, { method: "GET", signal });
+	const serverId = res.headers.get("zotero-server-id");
+	if (!serverId) {
+		throw new ZoteroError("Local Zotero response did not include Zotero-Server-ID header", res.status, "");
+	}
+	return serverId;
+}
+
+export async function authorizeLocalWrite(
+	baseUrl: string,
+	serverId: string,
+	appName = "Pi Coding Agent",
+	signal?: AbortSignal,
+	notify?: (msg: string) => void,
+): Promise<{ key: string; remember: boolean }> {
+	notify?.("Zotero write permission requested. Please approve the dialog in the Zotero desktop app.");
+
+	const res = await fetch(`${baseUrl}/local/authorize`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"Zotero-Server-ID": serverId,
+		},
+		body: JSON.stringify({ appName }),
+		signal,
+	});
+
+	if (res.status === 403) {
+		throw new ZoteroError("Zotero write authorization denied by user", res.status, await res.text().catch(() => ""));
+	}
+	if (res.status === 429) {
+		const retry = res.headers.get("Retry-After") || "a minute";
+		throw new ZoteroError(`Zotero authorization rate limited. Please wait ${retry}.`, res.status, "");
+	}
+	if (!res.ok) {
+		throw new ZoteroError("Failed to authorize local write", res.status, await res.text().catch(() => ""));
+	}
+
+	return (await res.json()) as { key: string; remember: boolean };
+}
+
+async function getOrRequestWriteKey(
+	cfg: ZoteroConfig,
+	baseUrl: string,
+	signal?: AbortSignal,
+): Promise<{ key: string; serverId: string; remember: boolean }> {
+	let session = localSessions.get(baseUrl);
+	if (!session) {
+		session = { serverId: cfg.serverId, writeKey: cfg.apiKey };
+		localSessions.set(baseUrl, session);
+	}
+
+	if (!session.serverId) {
+		session.serverId = await fetchServerId(baseUrl, signal);
+	}
+
+	// If we already have a remembered or currently valid key, return it
+	if (session.writeKey) {
+		return { key: session.writeKey, serverId: session.serverId, remember: !!session.remember };
+	}
+
+	// Trigger interactive authorization
+	const auth = await authorizeLocalWrite(baseUrl, session.serverId, "Pi Coding Agent", signal, cfg.notify);
+	session.writeKey = auth.key;
+	session.remember = auth.remember;
+
+	if (auth.remember && cfg.saveAuth) {
+		try {
+			await cfg.saveAuth({ serverId: session.serverId, localKey: auth.key, remember: true });
+		} catch {
+			// Ignore persistence error
+		}
+	}
+
+	return { key: auth.key, serverId: session.serverId, remember: auth.remember };
+}
+
+function isWriteMethod(method?: string): boolean {
+	const m = (method ?? "GET").toUpperCase();
+	return m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE";
 }
 
 async function zoteroFetch(
@@ -46,10 +155,72 @@ async function zoteroFetch(
 	path: string,
 	init: RequestInit & { signal?: AbortSignal } = {},
 ): Promise<Response> {
-	const res = await fetch(`${ZOTERO_API_BASE}${path}`, {
-		...init,
-		headers: { ...baseHeaders(cfg), ...(init.headers ?? {}) },
-	});
+	const base = getBaseUrl(cfg);
+	const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+	const local = isLocal(cfg);
+	const write = isWriteMethod(init.method);
+
+	const executeRequest = async (key?: string, sId?: string): Promise<Response> => {
+		const reqHeaders: Record<string, string> = {
+			"Zotero-API-Version": "3",
+			...(init.headers as Record<string, string> ?? {}),
+		};
+
+		if (local) {
+			if (sId) reqHeaders["Zotero-Server-ID"] = sId;
+			if (write && key) reqHeaders["Zotero-API-Key"] = key;
+			else if (cfg.apiKey && !write) reqHeaders["Zotero-API-Key"] = cfg.apiKey;
+		} else {
+			if (cfg.apiKey) reqHeaders["Zotero-API-Key"] = cfg.apiKey;
+		}
+
+		return await fetch(url, { ...init, headers: reqHeaders });
+	};
+
+	let res: Response;
+
+	if (local && write) {
+		let auth = await getOrRequestWriteKey(cfg, base, init.signal);
+		res = await executeRequest(auth.key, auth.serverId);
+
+		// If 401 Unauthorized or single-use key consumed, invalidate
+		const session = localSessions.get(base);
+		if (!auth.remember && session) {
+			session.writeKey = undefined;
+		}
+
+		// Handle 401: Key expired or rejected, retry authorization once
+		if (res.status === 401) {
+			if (session) session.writeKey = undefined;
+			auth = await getOrRequestWriteKey(cfg, base, init.signal);
+			res = await executeRequest(auth.key, auth.serverId);
+			if (!auth.remember && session) {
+				session.writeKey = undefined;
+			}
+		}
+
+		// Handle 412: Database/server changed, refresh server ID and retry once
+		if (res.status === 412) {
+			if (session) {
+				session.serverId = undefined;
+				session.writeKey = undefined;
+			}
+			auth = await getOrRequestWriteKey(cfg, base, init.signal);
+			res = await executeRequest(auth.key, auth.serverId);
+			if (!auth.remember && session) {
+				session.writeKey = undefined;
+			}
+		}
+	} else if (local) {
+		// Read request on local
+		const session = localSessions.get(base);
+		const sId = session?.serverId ?? cfg.serverId;
+		res = await executeRequest(undefined, sId);
+	} else {
+		// Web API
+		res = await executeRequest();
+	}
+
 	if (!res.ok) {
 		const body = await res.text().catch(() => "");
 		throw new ZoteroError(`Zotero API request to ${path} failed`, res.status, body);
@@ -124,10 +295,12 @@ export async function itemTemplate(
 	itemType: string,
 	linkMode?: string,
 	signal?: AbortSignal,
+	cfg?: ZoteroConfig,
 ): Promise<Record<string, unknown>> {
 	const q = new URLSearchParams({ itemType });
 	if (linkMode) q.set("linkMode", linkMode);
-	const res = await fetch(`${ZOTERO_API_BASE}/items/new?${q.toString()}`, { signal });
+	const base = getBaseUrl(cfg);
+	const res = await fetch(`${base}/items/new?${q.toString()}`, { signal });
 	if (!res.ok) throw new ZoteroError("Failed to fetch item template", res.status, await res.text());
 	return (await res.json()) as Record<string, unknown>;
 }
@@ -583,8 +756,10 @@ export interface NameLocalized {
 /** GET /itemTypes — all item types with localized names. */
 export async function listItemTypes(
 	signal?: AbortSignal,
+	cfg?: ZoteroConfig,
 ): Promise<Array<{ itemType: string; localized: string }>> {
-	const res = await fetch(`${ZOTERO_API_BASE}/itemTypes`, { signal });
+	const base = getBaseUrl(cfg);
+	const res = await fetch(`${base}/itemTypes`, { signal });
 	if (!res.ok) throw new ZoteroError("Failed to list item types", res.status, await res.text());
 	return (await res.json()) as Array<{ itemType: string; localized: string }>;
 }
@@ -592,8 +767,10 @@ export async function listItemTypes(
 /** GET /itemFields — all item fields with localized names. */
 export async function listItemFields(
 	signal?: AbortSignal,
+	cfg?: ZoteroConfig,
 ): Promise<Array<{ field: string; localized: string }>> {
-	const res = await fetch(`${ZOTERO_API_BASE}/itemFields`, { signal });
+	const base = getBaseUrl(cfg);
+	const res = await fetch(`${base}/itemFields`, { signal });
 	if (!res.ok) throw new ZoteroError("Failed to list item fields", res.status, await res.text());
 	return (await res.json()) as Array<{ field: string; localized: string }>;
 }
@@ -602,9 +779,11 @@ export async function listItemFields(
 export async function listItemTypeFields(
 	itemType: string,
 	signal?: AbortSignal,
+	cfg?: ZoteroConfig,
 ): Promise<Array<{ field: string; localized: string }>> {
 	const q = new URLSearchParams({ itemType });
-	const res = await fetch(`${ZOTERO_API_BASE}/itemTypeFields?${q.toString()}`, { signal });
+	const base = getBaseUrl(cfg);
+	const res = await fetch(`${base}/itemTypeFields?${q.toString()}`, { signal });
 	if (!res.ok) throw new ZoteroError("Failed to list fields for item type", res.status, await res.text());
 	return (await res.json()) as Array<{ field: string; localized: string }>;
 }
@@ -613,9 +792,11 @@ export async function listItemTypeFields(
 export async function listCreatorTypes(
 	itemType: string,
 	signal?: AbortSignal,
+	cfg?: ZoteroConfig,
 ): Promise<Array<{ creatorType: string; localized: string }>> {
 	const q = new URLSearchParams({ itemType });
-	const res = await fetch(`${ZOTERO_API_BASE}/itemTypeCreatorTypes?${q.toString()}`, { signal });
+	const base = getBaseUrl(cfg);
+	const res = await fetch(`${base}/itemTypeCreatorTypes?${q.toString()}`, { signal });
 	if (!res.ok) throw new ZoteroError("Failed to list creator types", res.status, await res.text());
 	return (await res.json()) as Array<{ creatorType: string; localized: string }>;
 }
@@ -623,8 +804,10 @@ export async function listCreatorTypes(
 /** GET /creatorFields — localized creator field names (firstName/lastName/name). */
 export async function listCreatorFields(
 	signal?: AbortSignal,
+	cfg?: ZoteroConfig,
 ): Promise<Array<{ field: string; localized: string }>> {
-	const res = await fetch(`${ZOTERO_API_BASE}/creatorFields`, { signal });
+	const base = getBaseUrl(cfg);
+	const res = await fetch(`${base}/creatorFields`, { signal });
 	if (!res.ok) throw new ZoteroError("Failed to list creator fields", res.status, await res.text());
 	return (await res.json()) as Array<{ field: string; localized: string }>;
 }

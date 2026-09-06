@@ -25,7 +25,7 @@ function harness() {
 	return { tools, ctx };
 }
 
-const AUTH = { auth: { apiKey: "KEY" }, env: { ZOTERO_USER_ID: "42" } };
+const AUTH = { auth: { apiKey: "KEY" }, env: { ZOTERO_MODE: "web", ZOTERO_USER_ID: "42" } };
 const NO_AUTH = undefined;
 
 describe("tools.zotero_search", () => {
@@ -47,10 +47,13 @@ describe("tools.zotero_search", () => {
 
 	it("throws a helpful error when no key is configured", async () => {
 		const { tools, ctx } = harness();
+		// Mock local API unreachable
+		const handle = mockFetch(() => undefined);
 		await assert.rejects(
 			() => tools.get("zotero_search")!.execute("id", { q: "x" }, undefined, undefined, ctx(NO_AUTH)),
 			/\/login zotero/,
 		);
+		handle.restore();
 	});
 });
 
