@@ -1,3 +1,7 @@
-# .agentports — ports forwarded from host loopback into the sandbox, one per line
+# Host loopback ports forwarded into the sandbox, one per line.
+
+# Zotero desktop's local API — the extension's local mode talks to it.
 23119
+
+# Locally hosted OpenAI-style inference server.
 11435

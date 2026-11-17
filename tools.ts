@@ -714,8 +714,68 @@ export function registerZoteroTools(pi: ExtensionAPI): void {
 			const cfg = await resolveConfig(ctx);
 			switch (params.action) {
 				case "get": {
-					const ft = await getFullText(cfg, params.itemKey, signal);
-					return textResult({ itemKey: params.itemKey, ...ft });
+					try {
+						const ft = await getFullText(cfg, params.itemKey, signal);
+						return textResult({ itemKey: params.itemKey, ...ft });
+					} catch (err: unknown) {
+						if (err instanceof ZoteroError && err.status === 404) {
+							// The item key might be a parent item, not an attachment.
+							// Try to find the attachment via links.attachment.
+							try {
+								const item = await getItem(cfg, params.itemKey, signal);
+								const attachmentKeys: string[] = [];
+
+								// Check links.attachment from the item response
+								const links = (item as Record<string, unknown>).links as
+									| Record<string, unknown>
+									| undefined;
+								if (links?.attachment) {
+									const att = links.attachment as Record<string, unknown>;
+									const href = att.href as string | undefined;
+									if (href) {
+										// Extract key from /api/users/3444309/items/KEY
+										const keyMatch = href.match(/\/items\/([^/?]+)$/);
+										if (keyMatch) attachmentKeys.push(keyMatch[1]);
+									}
+								}
+
+								// Also check children for PDF attachments
+								if (attachmentKeys.length === 0) {
+									const children = await getChildren(cfg, params.itemKey, signal);
+									for (const c of children) {
+										const type = c.data?.itemType;
+										if (type === "attachment") {
+											const contentType = c.data?.contentType || "";
+											if (
+												contentType === "application/pdf" ||
+												contentType.startsWith("image/")
+											) {
+												attachmentKeys.push(c.key);
+											}
+										}
+									}
+								}
+
+								if (attachmentKeys.length > 0) {
+									const title = (item.data?.title || "(no title)") as string;
+									return textResult({
+										error: `Fulltext not found for item \"${title}\" (${item.data?.itemType}).`,
+										reason: "not an attachment",
+										itemKey: params.itemKey,
+										itemType: item.data?.itemType,
+										potentialAttachments: attachmentKeys,
+										note:
+											attachmentKeys.length === 1
+												? `Try zotero_fulltext with itemKey: ${attachmentKeys[0]}`
+												: `Possible attachment keys: ${attachmentKeys.map((k) => `\"${k}\"`).join(", ")}`,
+									});
+								}
+							} catch {
+								// Item doesn't exist or another error — fall through
+							}
+						}
+						throw err;
+					}
 				}
 				case "set": {
 					if (!params.content) throw new Error("content is required for set.");

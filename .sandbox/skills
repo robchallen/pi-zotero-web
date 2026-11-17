@@ -1,0 +1,11 @@
+# Which of this machine's skills this project's sessions get.
+# One regular expression per line, matched against the whole skill name.
+# scoder's own skills are always included; so are any skills the project
+# itself carries.
+
+# GitHub CLI: this project lives on GitHub (issues, PRs, upstream repos).
+gh
+.*-github-project-.*
+
+# Meta-skills for writing/finding skills.
+create-new-skill|skill-creator|find-skills

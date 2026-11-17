@@ -1,10 +1,7 @@
+# Project-relative paths kept read-only inside the sandbox.
+# The baseline already covers .claude/, opencode.json, package-lock.json,
+# the other lockfiles, mise.toml, $HOME/.aliases and $HOME/.npm-global.
+
+# CI workflows: the agent should read them, not rewrite them.
 .github/
-.claude/
-opencode.json
 .gitignore
-package-lock.json
-poetry.lock
-Cargo.lock
-pnpm-lock.yaml
-yarn.lock
-mise.toml
