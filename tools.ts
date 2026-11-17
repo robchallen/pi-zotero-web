@@ -11,6 +11,7 @@ import {
 import {
 	type ZoteroConfig,
 	type ZoteroItem,
+	ZoteroError,
 	addItemsToCollection,
 	createCollections,
 	deleteCollection,
@@ -718,7 +719,7 @@ export function registerZoteroTools(pi: ExtensionAPI): void {
 						const ft = await getFullText(cfg, params.itemKey, signal);
 						return textResult({ itemKey: params.itemKey, ...ft });
 					} catch (err: unknown) {
-						if (err instanceof ZoteroError && err.status === 404) {
+						if (typeof err === "object" && err !== null && "status" in Object(err) && (err as Record<string, unknown>).status === 404) {
 							// The item key might be a parent item, not an attachment.
 							// Try to find the attachment via links.attachment.
 							try {
@@ -729,6 +730,7 @@ export function registerZoteroTools(pi: ExtensionAPI): void {
 								const links = (item as Record<string, unknown>).links as
 									| Record<string, unknown>
 									| undefined;
+								console.log("[DEBUG] links:", JSON.stringify(links));
 								if (links?.attachment) {
 									const att = links.attachment as Record<string, unknown>;
 									const href = att.href as string | undefined;

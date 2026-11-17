@@ -578,4 +578,104 @@ describe("tools.zotero_fulltext", () => {
 		assert.equal(parsed.ok, true);
 		handle.restore();
 	});
+
+	it("returns an informative error when the key is a parent item, not an attachment", async () => {
+		const { tools, ctx } = harness();
+		// 404 for fulltext on the parent item
+		const handle = mockFetch((c) => {
+			if (c.url.includes("/users/42/items/ATT/fulltext")) return { status: 404, body: "Not found" };
+			if (c.url.includes("/users/42/items/ATT") && !c.url.includes("fulltext") && !c.url.includes("children"))
+				return {
+					status: 200,
+					body: {
+						key: "ATT",
+						version: 1,
+						data: { itemType: "journalArticle", title: "Fake Paper" },
+						links: {
+							self: { href: "/users/42/items/ATT" },
+							attachment: {
+								href: "/users/42/items/ATTACH",
+								type: "application/json",
+								attachmentType: "application/pdf",
+								attachmentSize: 1234,
+							},
+						},
+					},
+				};
+			if (c.url.includes("/users/42/items/ATT/children"))
+				return { status: 200, body: [] };
+			return undefined;
+		});
+		const res = await tools.get("zotero_fulltext")!.execute("id", { action: "get", itemKey: "ATT" }, undefined, undefined, ctx(AUTH));
+		const parsed = JSON.parse((res.content[0] as { text: string }).text);
+		assert.ok(parsed.error);
+		assert.equal(parsed.reason, "not an attachment");
+		assert.equal(parsed.itemKey, "ATT");
+		assert.equal(parsed.itemType, "journalArticle");
+		assert.deepEqual(parsed.potentialAttachments, ["ATTACH"]);
+		assert.ok(parsed.note!.includes("ATTACH"));
+		handle.restore();
+	});
+
+	it("suggests attachment keys from children when links.attachment is absent", async () => {
+		const { tools, ctx } = harness();
+		const handle = mockFetch((c) => {
+			if (c.url.includes("/fulltext")) return { status: 404, body: "Not found" };
+			if (c.url.includes("/items/PARENT") && !c.url.includes("children"))
+				return {
+					status: 200,
+					body: {
+						key: "PARENT",
+						version: 1,
+						data: { itemType: "journalArticle", title: "Another Paper" },
+						links: { self: { href: "/users/42/items/PARENT" } },
+					},
+				};
+			if (c.url.includes("/items/PARENT/children"))
+				return {
+					status: 200,
+					body: [
+						{ key: "PDF", version: 0, data: { itemType: "attachment", contentType: "application/pdf" } },
+						{ key: "DOC", version: 0, data: { itemType: "attachment", contentType: "application/msword" } },
+					],
+				};
+			return undefined;
+		});
+		const res = await tools.get("zotero_fulltext")!.execute("id", { action: "get", itemKey: "PARENT" }, undefined, undefined, ctx(AUTH));
+		const parsed = JSON.parse((res.content[0] as { text: string }).text);
+		assert.deepEqual(parsed.potentialAttachments, ["PDF"]); // only PDF, not DOC
+		assert.equal(parsed.note, 'Try zotero_fulltext with itemKey: PDF');
+		handle.restore();
+	});
+
+	it("suggests multiple attachment keys with plural note", async () => {
+		const { tools, ctx } = harness();
+		const handle = mockFetch((c) => {
+			if (c.url.includes("/fulltext")) return { status: 404, body: "Not found" };
+			if (c.url.includes("/items/BK") && !c.url.includes("children"))
+				return {
+					status: 200,
+					body: {
+						key: "BK",
+						version: 1,
+						data: { itemType: "bookSection", title: "A Chapter" },
+						links: { self: { href: "/users/42/items/BK" } },
+					},
+				};
+			if (c.url.includes("/items/BK/children"))
+				return {
+					status: 200,
+					body: [
+						{ key: "IMG1", version: 0, data: { itemType: "attachment", contentType: "image/png" } },
+						{ key: "IMG2", version: 0, data: { itemType: "attachment", contentType: "image/jpeg" } },
+					],
+				};
+			return undefined;
+		});
+		const res = await tools.get("zotero_fulltext")!.execute("id", { action: "get", itemKey: "BK" }, undefined, undefined, ctx(AUTH));
+		const parsed = JSON.parse((res.content[0] as { text: string }).text);
+		assert.deepEqual(parsed.potentialAttachments, ["IMG1", "IMG2"]);
+		assert.equal(parsed.note, 'Possible attachment keys: "IMG1", "IMG2"');
+		handle.restore();
+	});
 });
