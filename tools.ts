@@ -730,7 +730,6 @@ export function registerZoteroTools(pi: ExtensionAPI): void {
 								const links = (item as Record<string, unknown>).links as
 									| Record<string, unknown>
 									| undefined;
-								console.log("[DEBUG] links:", JSON.stringify(links));
 								if (links?.attachment) {
 									const att = links.attachment as Record<string, unknown>;
 									const href = att.href as string | undefined;
